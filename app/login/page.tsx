@@ -11,12 +11,12 @@ export default function LoginPage() {
 
   useEffect(() => {
     if (isAuthenticated) {
-      router.push('/');
+      router.push('/dashboard');
     }
   }, [isAuthenticated, router]);
 
   const handleLogin = () => {
-    router.push('/');
+    router.push('/dashboard');
   };
 
   return <LoginScreen onLogin={handleLogin} />;
