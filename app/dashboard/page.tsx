@@ -65,8 +65,8 @@ export default function DashboardPage() {
   };
 
   const handleStockTake = () => {
-    // Navigate to Stock Take page (you can create this route)
-    console.log('Navigate to Stock Take');
+    // Navigate to Stock Take page
+    router.push('/stock-take');
   };
 
   const handleProfile = () => {

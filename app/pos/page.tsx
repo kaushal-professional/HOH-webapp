@@ -366,6 +366,7 @@ export default function PointOfSalePage() {
   const [generalNotePromoter, setGeneralNotePromoter] = useState('');
   const [generalNoteText, setGeneralNoteText] = useState('');
   const [selectedDate, setSelectedDate] = useState(new Date());
+  const [isSubmittingPayment, setIsSubmittingPayment] = useState(false);
 
   // Price cache
   const priceCache = useRef<Map<string, { price: number; gst: number; timestamp: number }>>(new Map());
@@ -1102,23 +1103,137 @@ export default function PointOfSalePage() {
     setKeypadValue('');
   };
 
-  const handleConfirmPayment = () => {
+  const handleConfirmPayment = async () => {
+    // Validate required fields
     if (!generalNoteDate.trim() || !generalNotePromoter.trim()) {
       alert('Please fill in the Date and Promoter name in the General Note before confirming payment.');
       setGeneralNoteModalVisible(true);
       return;
     }
 
-    if (confirm(`Total Amount: ₹ ${grandTotal.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}\n\nDo you want to confirm this payment?`)) {
-      // Handle payment confirmation
+    if (cartItems.length === 0) {
+      alert('Cart is empty. Please add items before confirming payment.');
+      return;
+    }
+
+    const confirmMessage = `Total Amount: ₹ ${grandTotal.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}\n\nDo you want to confirm this payment?`;
+
+    if (!confirm(confirmMessage)) {
+      return;
+    }
+
+    setIsSubmittingPayment(true);
+
+    try {
+      // Prepare cart items for API
+      const itemsPayload = cartItems.map(item => ({
+        ykey: item.ykey,
+        product: item.product,
+        quantity: item.quantity,
+        price: item.unitPrice ? (item.quantity * item.unitPrice) : item.price,
+        unit: item.unit || 'Kg',
+        discount: item.discount || 0,
+      }));
+
+      // Prepare barcode scanned pages data
+      const barcodeScannedPages = scannerPages.map((page, index) => ({
+        page_number: index + 1,
+        store_name: page.storeName || user?.pos_shop_name || '',
+        items_count: page.scannedItems.length,
+        items: page.scannedItems.map(item => ({
+          barcode: item.barcode,
+          product: item.product,
+          price: item.price,
+          price_per_kg: item.pricePerKg,
+          weight: item.weight,
+          gst: item.gst,
+          article_code: item.article_code,
+          timestamp: item.timestamp,
+        })),
+      }));
+
+      const totalBarcodeCount = scannerPages.reduce(
+        (sum, page) => sum + page.scannedItems.length,
+        0
+      );
+
+      // Construct payload matching React Native implementation
+      const payload = {
+        store_name: user?.pos_shop_name || '',
+        customer_email: selectedCustomer?.email || 'poscustomer@gmail.com',
+        items: itemsPayload,
+        general_note: {
+          date: generalNoteDate,
+          promoter_name: generalNotePromoter,
+          barcode_scanned_pages: barcodeScannedPages,
+          total_barcode_count: totalBarcodeCount,
+          note_text: generalNoteText || '',
+        },
+        total_amount: grandTotal,
+        total_quantity: totalItems,
+        taxes: taxes,
+      };
+
+      console.log('📤 Submitting POS entry:', payload);
+
+      const response = await fetch(`${BACKEND_URL}/api/pos-entries`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`,
+        },
+        body: JSON.stringify(payload),
+      });
+
+      console.log('📡 POS entry response status:', response.status);
+
+      if (!response.ok) {
+        const errorText = await response.text();
+        console.error('❌ POS entry error:', errorText);
+        throw new Error(`Failed to submit: ${response.status} - ${errorText || response.statusText}`);
+      }
+
+      const responseData = await response.json();
+      console.log('✅ POS entry response:', responseData);
+
+      // Success - clear cart and reset state
       if (currentOrderId) {
         updateCurrentOrderItems([]);
       }
+
+      // Reset scanner pages
+      setScannerPages([{ id: '1', storeName: user?.pos_shop_name || '', scannedItems: [] }]);
+      setCurrentPageIndex(0);
+      hasScannerSyncedRef.current = false;
+
+      // Reset general note fields
       setGeneralNoteDate('');
       setGeneralNotePromoter('');
       setGeneralNoteText('');
-      alert(`Payment confirmed successfully!\n\nDate: ${generalNoteDate}\nPOS Store Name: ${user?.pos_shop_name || 'N/A'}\nTotal Amount: ₹ ${grandTotal.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}\nTotal Kgs: ${totalItems.toFixed(3)}`);
+
+      alert(
+        `Payment confirmed successfully!\n\n` +
+        `Date: ${generalNoteDate}\n` +
+        `POS Store Name: ${user?.pos_shop_name || 'N/A'}\n` +
+        `Total Amount: ₹ ${grandTotal.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}\n` +
+        `Total Kgs: ${totalItems.toFixed(3)}\n` +
+        `Barcodes Scanned: ${totalBarcodeCount}`
+      );
+
       setShowCart(false);
+    } catch (error) {
+      console.error('❌ Payment submission error:', error);
+      const errorMessage = error instanceof Error ? error.message : 'Unknown error occurred';
+
+      if (errorMessage.includes('Network') || errorMessage.includes('Failed to fetch')) {
+        alert('Network Error\n\nCould not connect to server. Please check your internet connection and try again.');
+      } else if (errorMessage.includes('401') || errorMessage.includes('403')) {
+        alert('Authentication Error\n\nYour session may have expired. Please login again.');
+      } else {
+        alert(`Payment Failed\n\n${errorMessage}\n\nPlease try again.`);
+      }
+    } finally {
+      setIsSubmittingPayment(false);
     }
   };
 
@@ -1164,15 +1279,15 @@ export default function PointOfSalePage() {
 
         {/* Main Header */}
         <header
-          className={`flex justify-between items-center px-4 py-3 h-14 ${
+          className={`flex justify-between items-center px-3 sm:px-4 py-2 sm:py-3 h-12 sm:h-14 ${
             isDarkMode ? 'bg-gray-800' : 'bg-gray-200'
           }`}
         >
-          <div className="flex items-center gap-3 flex-1">
+          <div className="flex items-center gap-2 sm:gap-3 flex-1">
             <button onClick={handleBack} className="hover:opacity-70 transition-opacity">
               <HamburgerIcon color={isDarkMode ? '#FFFFFF' : '#000000'} />
             </button>
-            <h1 className={`text-lg font-semibold ${isDarkMode ? 'text-white' : 'text-black'}`}>
+            <h1 className={`text-base sm:text-lg font-semibold ${isDarkMode ? 'text-white' : 'text-black'}`}>
               Point of Sale
             </h1>
           </div>
@@ -1186,10 +1301,10 @@ export default function PointOfSalePage() {
         </header>
 
         {/* Content */}
-        <main className={`flex-1 p-4 ${isDarkMode ? 'bg-gray-900' : 'bg-gray-100'}`}>
+        <main className={`flex-1 p-3 sm:p-4 md:p-6 ${isDarkMode ? 'bg-gray-900' : 'bg-gray-100'}`}>
           {/* Store Header */}
-          <div className="flex justify-between items-center mb-3">
-            <h2 className={`text-base font-medium flex-1 ${isDarkMode ? 'text-white' : 'text-black'}`}>
+          <div className="flex justify-between items-center mb-2 sm:mb-3">
+            <h2 className={`text-sm sm:text-base font-medium flex-1 ${isDarkMode ? 'text-white' : 'text-black'}`}>
               {user.pos_shop_name || 'Store'}
             </h2>
             <button className="hover:opacity-70 transition-opacity">
@@ -1198,17 +1313,17 @@ export default function PointOfSalePage() {
           </div>
 
           {/* User Name Section */}
-          <div className="mb-6">
-            <h3 className={`text-xl font-bold ${isDarkMode ? 'text-white' : 'text-black'}`}>
+          <div className="mb-4 sm:mb-6">
+            <h3 className={`text-lg sm:text-xl font-bold ${isDarkMode ? 'text-white' : 'text-black'}`}>
               {user.users || user.company || 'User'}
             </h3>
           </div>
 
           {/* Action Section */}
-          <div className="mb-6">
+          <div className="mb-4 sm:mb-6">
             <button
               onClick={handleContinueSelling}
-              className="w-full bg-purple-600 hover:bg-purple-700 text-white font-semibold py-3.5 px-6 rounded-lg transition-colors shadow-md"
+              className="w-full bg-purple-600 hover:bg-purple-700 text-white font-semibold py-2.5 sm:py-3.5 px-4 sm:px-6 rounded-lg transition-colors shadow-md text-sm sm:text-base"
             >
               Continue Selling
             </button>
@@ -1239,16 +1354,16 @@ export default function PointOfSalePage() {
         <div className="h-1 bg-red-900 shrink-0" />
 
         {/* Cart Top Bar */}
-        <header className={`flex items-center px-4 py-3 gap-3 min-h-12 shrink-0 ${isDarkMode ? 'bg-gray-800' : 'bg-gray-200'}`}>
+        <header className={`flex items-center px-2 sm:px-4 py-2 sm:py-3 gap-2 sm:gap-3 min-h-10 sm:min-h-12 shrink-0 ${isDarkMode ? 'bg-gray-800' : 'bg-gray-200'}`}>
           <button
             onClick={handleCreateNewOrder}
-            className="w-9 h-9 bg-white rounded flex items-center justify-center hover:opacity-80"
+            className="w-7 h-7 sm:w-9 sm:h-9 bg-white rounded flex items-center justify-center hover:opacity-80"
           >
             <PlusIcon color="#4A90E2" />
           </button>
           <button
             onClick={() => setOrderSelectorVisible(true)}
-            className="w-9 h-9 bg-white rounded flex items-center justify-center hover:opacity-80"
+            className="w-7 h-7 sm:w-9 sm:h-9 bg-white rounded flex items-center justify-center hover:opacity-80"
           >
             <DownArrowIcon color="#4A90E2" />
           </button>
@@ -1265,7 +1380,7 @@ export default function PointOfSalePage() {
         <div className="flex-1 overflow-y-auto bg-white min-h-0">{cartItems.map((item, index) => (
             <div
               key={index}
-              className={`flex items-center justify-between px-4 py-3 border-b border-gray-200 ${
+              className={`flex items-center justify-between px-2 sm:px-4 py-2 sm:py-3 border-b border-gray-200 ${
                 selectedCartItem === index ? 'bg-cyan-50' : 'bg-white'
               }`}
             >
@@ -1273,9 +1388,9 @@ export default function PointOfSalePage() {
                 onClick={() => handleSelectCartItem(index)}
                 className="flex-1 flex items-center justify-between hover:opacity-80"
               >
-                <div className="flex-1 mr-4">
-                  <p className="text-base font-medium text-black mb-1">{item.product}</p>
-                  <p className="text-sm text-gray-600">
+                <div className="flex-1 mr-2 sm:mr-4">
+                  <p className="text-sm sm:text-base font-medium text-black mb-0.5 sm:mb-1">{item.product}</p>
+                  <p className="text-xs sm:text-sm text-gray-600">
                     Weight: {item.quantity.toFixed(3)} {item.unit}
                     {item.discount && item.discount > 0 && (
                       <span className="text-blue-600 font-medium"> ({item.discount}% off)</span>
@@ -1283,7 +1398,7 @@ export default function PointOfSalePage() {
                   </p>
                 </div>
                 <div className="text-right">
-                  <p className="text-base font-semibold text-black">
+                  <p className="text-sm sm:text-base font-semibold text-black">
                     ₹ {(() => {
                       // Calculate price as quantity * unitPrice (or fall back to stored price)
                       const basePrice = item.unitPrice ? (item.quantity * item.unitPrice) : (item.price || 0);
@@ -1313,25 +1428,25 @@ export default function PointOfSalePage() {
         </div>
 
         {/* Transaction Summary - Fixed */}
-        <div className="px-4 py-3 bg-white border-t border-gray-200 shrink-0">
-          <div className="flex justify-between items-center mb-2">
-            <span className="text-base text-gray-600">Taxes</span>
-            <span className="text-base text-gray-600">₹ {taxes.toFixed(2)}</span>
+        <div className="px-2 sm:px-4 py-2 sm:py-3 bg-white border-t border-gray-200 shrink-0">
+          <div className="flex justify-between items-center mb-1 sm:mb-2">
+            <span className="text-sm sm:text-base text-gray-600">Taxes</span>
+            <span className="text-sm sm:text-base text-gray-600">₹ {taxes.toFixed(2)}</span>
           </div>
           <div className="flex justify-between items-center">
-            <span className="text-lg font-bold text-black">Total</span>
-            <span className="text-lg font-bold text-black">₹ {grandTotal.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+            <span className="text-base sm:text-lg font-bold text-black">Total</span>
+            <span className="text-base sm:text-lg font-bold text-black">₹ {grandTotal.toLocaleString('en-IN', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
           </div>
         </div>
 
         {/* Keypad - Fixed */}
-        <div className="px-3 py-2 bg-gray-100 border-t border-gray-200 shrink-0">
+        <div className="px-2 sm:px-3 py-1.5 sm:py-2 bg-gray-100 border-t border-gray-200 shrink-0">
           {selectedCartItem !== null ? (
-            <div className="bg-white rounded-lg px-3 py-2 mb-2 border-2 border-blue-500 flex justify-between items-center">
-              <span className="text-sm font-semibold text-gray-600">
+            <div className="bg-white rounded-lg px-2 sm:px-3 py-1.5 sm:py-2 mb-1.5 sm:mb-2 border-2 border-blue-500 flex justify-between items-center">
+              <span className="text-xs sm:text-sm font-semibold text-gray-600">
                 {activeMode === 'qty' ? 'Quantity' : activeMode === 'price' ? 'Price' : 'Discount'}:
               </span>
-              <span className="text-xl font-bold text-black">
+              <span className="text-base sm:text-xl font-bold text-black">
                 {keypadValue || '0'}
                 {activeMode === 'percent' && '%'}
                 {activeMode === 'price' && ' ₹'}
@@ -1344,13 +1459,13 @@ export default function PointOfSalePage() {
             </div>
           )}
 
-          <div className="grid grid-cols-4 gap-2">
+          <div className="grid grid-cols-4 gap-1.5 sm:gap-2">
             {/* Row 1 */}
             {[1, 2, 3].map(num => (
               <button
                 key={num}
                 onClick={() => handleKeypadInput(num.toString())}
-                className="aspect-[1.6] bg-gray-200 rounded flex items-center justify-center text-base font-semibold text-gray-800 hover:bg-gray-300"
+                className="aspect-[1.6] bg-gray-200 rounded flex items-center justify-center text-sm sm:text-base font-semibold text-gray-800 hover:bg-gray-300"
               >
                 {num}
               </button>
@@ -1363,7 +1478,7 @@ export default function PointOfSalePage() {
                   setKeypadValue(cartItems[selectedCartItem].quantity.toString());
                 }
               }}
-              className={`aspect-[1.6] rounded flex items-center justify-center text-sm font-semibold ${
+              className={`aspect-[1.6] rounded flex items-center justify-center text-xs sm:text-sm font-semibold ${
                 activeMode === 'qty' ? 'bg-teal-200 text-gray-800' : 'bg-gray-200 text-gray-800'
               } hover:opacity-80`}
             >
@@ -1450,34 +1565,43 @@ export default function PointOfSalePage() {
         </div>
 
         {/* Action Buttons - Fixed */}
-        <div className="flex px-4 py-2 gap-3 bg-gray-100 border-t border-gray-200 shrink-0">
+        <div className="flex px-2 sm:px-4 py-1.5 sm:py-2 gap-2 sm:gap-3 bg-gray-100 border-t border-gray-200 shrink-0">
           <button
             onClick={() => setPosCustomerModalVisible(true)}
-            className="flex-1 bg-gray-200 rounded-lg py-3 text-base font-semibold text-blue-600 hover:bg-gray-300"
+            className="flex-1 bg-gray-200 rounded-lg py-2 sm:py-3 text-sm sm:text-base font-semibold text-blue-600 hover:bg-gray-300"
           >
             POS Customer
           </button>
           <button
             onClick={() => setGeneralNoteModalVisible(true)}
-            className="flex-1 bg-gray-200 rounded-lg py-3 text-base font-semibold text-black hover:bg-gray-300"
+            className="flex-1 bg-gray-200 rounded-lg py-2 sm:py-3 text-sm sm:text-base font-semibold text-black hover:bg-gray-300"
           >
             Actions
           </button>
         </div>
 
         {/* Bottom Navigation - Fixed */}
-        <div className="flex items-center px-4 py-3 gap-3 bg-gray-100 border-t border-gray-200 shrink-0">
+        <div className="flex items-center px-2 sm:px-4 py-2 sm:py-3 gap-2 sm:gap-3 bg-gray-100 border-t border-gray-200 shrink-0">
           <button
             onClick={handleBackToProducts}
-            className="w-14 h-13 bg-gray-200 rounded-lg flex items-center justify-center hover:bg-gray-300"
+            disabled={isSubmittingPayment}
+            className="w-10 h-10 sm:w-14 sm:h-13 bg-gray-200 rounded-lg flex items-center justify-center hover:bg-gray-300 disabled:opacity-50"
           >
-            <span className="text-2xl font-semibold text-gray-800">&lt;</span>
+            <span className="text-xl sm:text-2xl font-semibold text-gray-800">&lt;</span>
           </button>
           <button
             onClick={handleConfirmPayment}
-            className="flex-1 bg-purple-600 rounded-lg py-3.5 text-lg font-bold text-white hover:bg-purple-700"
+            disabled={isSubmittingPayment}
+            className="flex-1 bg-purple-600 rounded-lg py-2.5 sm:py-3.5 text-base sm:text-lg font-bold text-white hover:bg-purple-700 disabled:opacity-70 disabled:cursor-not-allowed flex items-center justify-center gap-2"
           >
-            Confirm
+            {isSubmittingPayment ? (
+              <>
+                <div className="animate-spin rounded-full h-5 w-5 border-b-2 border-white"></div>
+                <span>Processing...</span>
+              </>
+            ) : (
+              'Confirm'
+            )}
           </button>
         </div>
 
@@ -1514,9 +1638,9 @@ export default function PointOfSalePage() {
         {/* POS Customer Modal */}
         {posCustomerModalVisible && (
           <div className="fixed inset-0 bg-black bg-opacity-50 flex items-end justify-center z-50">
-            <div className="bg-white rounded-t-3xl w-full max-h-[80%] flex flex-col pb-5">
-              <div className="flex justify-between items-center p-4 border-b border-gray-200 shrink-0">
-                <h2 className="text-lg font-semibold text-black">POS Customer</h2>
+            <div className="bg-white rounded-t-3xl w-full max-w-2xl mx-auto max-h-[80%] flex flex-col pb-3 sm:pb-5">
+              <div className="flex justify-between items-center p-3 sm:p-4 border-b border-gray-200 shrink-0">
+                <h2 className="text-base sm:text-lg font-semibold text-black">POS Customer</h2>
                 <button
                   onClick={() => setPosCustomerModalVisible(false)}
                   className="text-gray-600 hover:text-gray-800"
@@ -1548,10 +1672,10 @@ export default function PointOfSalePage() {
                 </div>
               )}
 
-              <div className="p-4 border-b border-gray-200 shrink-0">
+              <div className="p-3 sm:p-4 border-b border-gray-200 shrink-0">
                 <input
                   type="text"
-                  className="w-full bg-gray-100 rounded-lg px-3 py-3 text-sm text-gray-800"
+                  className="w-full bg-gray-100 rounded-lg px-2 sm:px-3 py-2 sm:py-3 text-xs sm:text-sm text-gray-800"
                   placeholder="Search customers..."
                   value={customerSearch}
                   onChange={(e) => setCustomerSearch(e.target.value)}
@@ -1603,8 +1727,8 @@ export default function PointOfSalePage() {
         {/* General Note Modal */}
         {generalNoteModalVisible && (
           <div className="fixed inset-0 bg-black bg-opacity-50 flex items-end justify-center z-50">
-            <div className="bg-white rounded-t-3xl w-full h-[90%] flex flex-col">
-              <div className="flex justify-between items-center p-4 border-b border-gray-200 shrink-0">
+            <div className="bg-white rounded-t-3xl w-full max-w-2xl mx-auto h-[90%] flex flex-col">
+              <div className="flex justify-between items-center p-3 sm:p-4 border-b border-gray-200 shrink-0">
                 <button
                   onClick={() => setGeneralNoteModalVisible(false)}
                   className="text-2xl font-semibold text-gray-800"
@@ -1615,20 +1739,20 @@ export default function PointOfSalePage() {
                 <div className="w-6" />
               </div>
 
-              <div className="flex-1 overflow-y-auto p-4 min-h-0">
-                <div className="space-y-5">
+              <div className="flex-1 overflow-y-auto p-3 sm:p-4 min-h-0">
+                <div className="space-y-3 sm:space-y-5">
                   {/* Date Field */}
                   <div>
-                    <label className="block text-sm font-medium text-gray-800 mb-2">
+                    <label className="block text-xs sm:text-sm font-medium text-gray-800 mb-1.5 sm:mb-2">
                       Date (DD-MM-YYYY) *
                     </label>
                     <button
                       onClick={() => setDatePickerVisible(true)}
-                      className="w-full flex items-center justify-between border-1.5 border-gray-400 rounded-lg px-3 py-3 bg-white hover:bg-gray-50"
+                      className="w-full flex items-center justify-between border-1.5 border-gray-400 rounded-lg px-2 sm:px-3 py-2 sm:py-3 bg-white hover:bg-gray-50"
                     >
                       <input
                         type="text"
-                        className="flex-1 text-sm text-gray-800 bg-transparent pointer-events-none"
+                        className="flex-1 text-xs sm:text-sm text-gray-800 bg-transparent pointer-events-none"
                         placeholder="dd-mm-yyyy"
                         value={generalNoteDate}
                         readOnly
@@ -1882,31 +2006,31 @@ export default function PointOfSalePage() {
 
       {/* Product Top Bar */}
       <header
-        className={`flex items-center px-4 py-3 gap-3 min-h-12 ${
+        className={`flex items-center px-2 sm:px-4 md:px-6 py-2 sm:py-3 gap-2 sm:gap-3 min-h-10 sm:min-h-12 ${
           isDarkMode ? 'bg-gray-800' : 'bg-gray-200'
         }`}
       >
         <button
           onClick={handleCreateNewOrder}
-          className="w-9 h-9 min-w-8 min-h-8 bg-white rounded flex items-center justify-center hover:opacity-80 transition-opacity"
+          className="w-7 h-7 sm:w-9 sm:h-9 min-w-6 min-h-6 sm:min-w-8 sm:min-h-8 bg-white rounded flex items-center justify-center hover:opacity-80 transition-opacity"
         >
           <PlusIcon color="#4A90E2" />
         </button>
 
-        <button className="w-9 h-9 min-w-8 min-h-8 bg-white rounded flex items-center justify-center hover:opacity-80 transition-opacity">
+        <button className="w-7 h-7 sm:w-9 sm:h-9 min-w-6 min-h-6 sm:min-w-8 sm:min-h-8 bg-white rounded flex items-center justify-center hover:opacity-80 transition-opacity">
           <DownArrowIcon color="#4A90E2" />
         </button>
 
         {isSearchActive ? (
           <>
-            <div className="flex-1 flex items-center gap-2 mr-2 min-w-37.5">
+            <div className="flex-1 flex items-center gap-1 sm:gap-2 mr-1 sm:mr-2 min-w-24 sm:min-w-37.5">
               <input
                 type="text"
-                className={`flex-1 h-9 rounded-lg px-3 text-sm border ${
+                className={`flex-1 h-7 sm:h-9 rounded-lg px-2 sm:px-3 text-xs sm:text-sm border ${
                   isDarkMode
                     ? 'bg-gray-800 text-white border-gray-600'
                     : 'bg-white text-black border-gray-300'
-                } min-w-30`}
+                } min-w-20 sm:min-w-30`}
                 placeholder="Search products..."
                 value={searchQuery}
                 onChange={(e) => setSearchQuery(e.target.value)}
@@ -1955,15 +2079,15 @@ export default function PointOfSalePage() {
       </header>
 
       {/* Category Container */}
-      <div className="px-4 py-3 flex items-center justify-center">
-        <button className="bg-blue-200 text-blue-900 px-6 py-3 rounded-lg min-w-50 text-center text-sm font-medium hover:bg-blue-300 transition-colors">
+      <div className="px-2 sm:px-4 md:px-6 py-2 sm:py-3 flex items-center justify-center">
+        <button className="bg-blue-200 text-blue-900 px-3 sm:px-6 py-2 sm:py-3 rounded-lg min-w-32 sm:min-w-50 text-center text-xs sm:text-sm font-medium hover:bg-blue-300 transition-colors">
           Smart, Essentials & Magson
         </button>
       </div>
 
       {/* Product Grid */}
-      <div className="flex-1 overflow-auto pb-24">
-        <div className="p-4">
+      <div className="flex-1 overflow-auto pb-20 sm:pb-24">
+        <div className="p-2 sm:p-4 md:p-6">
           {productsLoading ? (
             <div className="flex flex-col items-center justify-center py-16">
               <div className="animate-spin rounded-full h-12 w-12 border-b-2 border-purple-600 mb-4"></div>
@@ -1992,7 +2116,7 @@ export default function PointOfSalePage() {
               </p>
             </div>
           ) : (
-            <div className="flex flex-wrap gap-3 justify-between">
+            <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-2 sm:gap-3 md:gap-4">
               {filteredProducts.map((product) => {
                 const count = getProductCount(product.ykey);
                 const productPrice = product.price || product.rate || PRODUCT_PRICE;
@@ -2002,15 +2126,15 @@ export default function PointOfSalePage() {
                   <button
                     key={product.ykey}
                     onClick={() => handleAddToCart(product.ykey, product.article, productPrice, productWeight, productGst)}
-                    className="w-[48%] bg-blue-200 rounded-lg p-4 min-h-25 flex flex-col items-center justify-center relative hover:bg-blue-300 transition-colors"
+                    className="bg-blue-200 rounded-lg p-2 sm:p-3 md:p-4 min-h-20 sm:min-h-25 flex flex-col items-center justify-center relative hover:bg-blue-300 transition-colors"
                   >
                     <InfoIcon color="#999999" />
-                    <p className="text-blue-900 text-xs font-medium text-center leading-4">
+                    <p className="text-blue-900 text-[10px] sm:text-xs font-medium text-center leading-3 sm:leading-4">
                       {product.article}
                     </p>
                     {count > 0 && (
-                      <div className="absolute bottom-2 right-2 w-6 h-6 rounded-full bg-blue-600 flex items-center justify-center">
-                        <span className="text-white text-xs font-bold">{count}</span>
+                      <div className="absolute bottom-1 right-1 sm:bottom-2 sm:right-2 w-5 h-5 sm:w-6 sm:h-6 rounded-full bg-blue-600 flex items-center justify-center">
+                        <span className="text-white text-[10px] sm:text-xs font-bold">{count}</span>
                       </div>
                     )}
                   </button>
@@ -2023,20 +2147,20 @@ export default function PointOfSalePage() {
 
       {/* Bottom Navigation */}
       <div
-        className={`fixed bottom-0 left-0 right-0 flex h-20 border-t px-4 py-3 gap-3 ${
+        className={`fixed bottom-0 left-0 right-0 flex h-16 sm:h-20 border-t px-2 sm:px-4 py-2 sm:py-3 gap-2 sm:gap-3 ${
           isDarkMode ? 'bg-gray-800 border-gray-700' : 'bg-white border-gray-300'
         }`}
       >
-        <button className="flex-1 bg-gray-200 rounded-lg p-3 flex flex-col items-center justify-center hover:bg-gray-300 transition-colors">
-          <span className="text-blue-900 text-sm font-semibold mb-1">Pay</span>
-          <span className="text-blue-900 text-sm font-medium">₹ {cartTotal.toFixed(2)}</span>
+        <button className="flex-1 bg-gray-200 rounded-lg p-2 sm:p-3 flex flex-col items-center justify-center hover:bg-gray-300 transition-colors">
+          <span className="text-blue-900 text-xs sm:text-sm font-semibold mb-0.5 sm:mb-1">Pay</span>
+          <span className="text-blue-900 text-xs sm:text-sm font-medium">₹ {cartTotal.toFixed(2)}</span>
         </button>
         <button
           onClick={handleCartClick}
-          className="flex-1 bg-gray-200 rounded-lg p-3 flex flex-col items-center justify-center hover:bg-gray-300 transition-colors"
+          className="flex-1 bg-gray-200 rounded-lg p-2 sm:p-3 flex flex-col items-center justify-center hover:bg-gray-300 transition-colors"
         >
-          <span className="text-blue-900 text-sm font-semibold mb-1">Cart</span>
-          <span className="text-blue-900 text-sm font-medium">{totalItems.toFixed(3)} kg</span>
+          <span className="text-blue-900 text-xs sm:text-sm font-semibold mb-0.5 sm:mb-1">Cart</span>
+          <span className="text-blue-900 text-xs sm:text-sm font-medium">{totalItems.toFixed(3)} kg</span>
         </button>
       </div>
 
@@ -2044,12 +2168,12 @@ export default function PointOfSalePage() {
       {barcodeScannerModalVisible && (
         <div className="fixed inset-0 bg-black bg-opacity-90 z-50 flex flex-col">
           {/* Header */}
-          <div className="bg-gray-800 px-4 py-3 flex justify-between items-center shrink-0">
-            <h2 className="text-lg font-semibold text-white">Barcode Scanner</h2>
-            <div className="flex items-center gap-3">
+          <div className="bg-gray-800 px-2 sm:px-4 py-2 sm:py-3 flex justify-between items-center shrink-0">
+            <h2 className="text-base sm:text-lg font-semibold text-white">Barcode Scanner</h2>
+            <div className="flex items-center gap-2 sm:gap-3">
               <button
                 onClick={handleScannerSubmit}
-                className="bg-purple-600 hover:bg-purple-700 px-4 py-2 rounded-lg text-white text-sm font-semibold transition-colors"
+                className="bg-purple-600 hover:bg-purple-700 px-3 sm:px-4 py-1.5 sm:py-2 rounded-lg text-white text-xs sm:text-sm font-semibold transition-colors"
               >
                 Submit ({scannerPages.reduce((sum, page) => sum + page.scannedItems.length, 0)})
               </button>
@@ -2063,13 +2187,13 @@ export default function PointOfSalePage() {
           </div>
 
           {/* Page Selector */}
-          <div className="bg-gray-900 py-3 border-b border-gray-700 shrink-0">
-            <div className="flex gap-2 px-4 overflow-x-auto">
+          <div className="bg-gray-900 py-2 sm:py-3 border-b border-gray-700 shrink-0">
+            <div className="flex gap-1.5 sm:gap-2 px-2 sm:px-4 overflow-x-auto">
               {scannerPages.map((page, index) => (
                 <button
                   key={page.id}
                   onClick={() => setCurrentPageIndex(index)}
-                  className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-colors whitespace-nowrap ${
+                  className={`flex items-center gap-1.5 sm:gap-2 px-3 sm:px-4 py-1.5 sm:py-2 rounded-lg text-xs sm:text-sm font-medium transition-colors whitespace-nowrap ${
                     index === currentPageIndex
                       ? 'bg-purple-600 text-white'
                       : 'bg-gray-700 text-gray-300 hover:bg-gray-600'
